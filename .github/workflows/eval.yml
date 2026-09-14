@@ -1,0 +1,35 @@
+name: eval
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  run-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Clone target repo at pinned commit
+        run: |
+          git clone https://github.com/encode/httpx.git target-repo
+          cd target-repo
+          git checkout b5addb64f0161ff6bfe94c124ef76f6a1fba5254
+      - run: python -m src.rag.ingest --repo-root ./target-repo --index-name mcp-codebase-agent --namespace ci
+        env:
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      - run: python -m src.eval.run_eval --questions eval/questions.jsonl --out eval/EVAL_REPORT.md
+        env:
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          PINECONE_NAMESPACE: ci
+          REPO_ROOT: ./target-repo
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval/EVAL_REPORT.md
