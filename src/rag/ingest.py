@@ -21,18 +21,14 @@ INDEXABLE_SUFFIXES = {
 }
 SKIP_DIR_NAMES = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 # Test files are deliberately excluded from RAG indexing: get_recent_commits/run_tests/
-# read_file already cover test-related questions directly, and skipping them keeps
-# ingestion comfortably under Gemini's free-tier daily embedding quota (see README
-# "Deviations from PRD").
+# read_file already cover test-related questions directly (see README "Deviations from
+# PRD").
 TEST_DIR_NAMES = {"tests", "test", "__tests__"}
 
-EMBED_BATCH_SIZE = 25
+EMBED_BATCH_SIZE = 64
 UPSERT_BATCH_SIZE = 100
-MAX_RETRIES = 6
-# Gemini's free tier caps gemini-embedding-2 at 100 embed requests/minute (each text in
-# a batch counts as one request). Pacing batches below that avoids ever hitting the cap.
-INTER_BATCH_SLEEP_SECONDS = 20
-RATE_LIMIT_BACKOFF_SECONDS = 65
+MAX_RETRIES = 4
+RETRY_BACKOFF_SECONDS = 3.0
 
 
 def _tracked_files(repo_root: Path) -> list[Path]:
@@ -67,16 +63,15 @@ def _iter_chunks(repo_root: Path) -> list[Chunk]:
 
 
 def _with_retry(fn, *args, **kwargs):
-    delay = 2.0
+    delay = RETRY_BACKOFF_SECONDS
     for attempt in range(MAX_RETRIES):
         try:
             return fn(*args, **kwargs)
-        except Exception as exc:  # Gemini/Pinecone rate limits, transient network errors
+        except Exception as exc:  # transient Pinecone/network errors
             if attempt == MAX_RETRIES - 1:
                 raise
-            wait = RATE_LIMIT_BACKOFF_SECONDS if "RESOURCE_EXHAUSTED" in str(exc) else delay
-            print(f"  retrying after error ({attempt + 1}/{MAX_RETRIES}), sleeping {wait}s: {exc}", file=sys.stderr)
-            time.sleep(wait)
+            print(f"  retrying after error ({attempt + 1}/{MAX_RETRIES}), sleeping {delay}s: {exc}", file=sys.stderr)
+            time.sleep(delay)
             delay *= 2
 
 
@@ -88,7 +83,7 @@ def ingest_repo(repo_root: str, index_name: str, namespace: str) -> int:
 
     pc = get_pinecone_client()
     index = ensure_index(pc, index_name)
-    embedder = get_embeddings_client(task_type="RETRIEVAL_DOCUMENT")
+    embedder = get_embeddings_client()
 
     total_upserted = 0
     for batch_start in range(0, len(chunks), EMBED_BATCH_SIZE):
@@ -117,8 +112,6 @@ def ingest_repo(repo_root: str, index_name: str, namespace: str) -> int:
             total_upserted += len(up_batch)
 
         print(f"  ingested {min(batch_start + EMBED_BATCH_SIZE, len(chunks))}/{len(chunks)} chunks", file=sys.stderr)
-        if batch_start + EMBED_BATCH_SIZE < len(chunks):
-            time.sleep(INTER_BATCH_SLEEP_SECONDS)
 
     return total_upserted
 

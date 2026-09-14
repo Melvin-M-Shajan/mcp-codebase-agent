@@ -17,7 +17,7 @@ class CodeMatch(BaseModel):
 def search_code(namespace: str, query: str, top_k: int = 8) -> list[CodeMatch]:
     top_k = min(max(top_k, 1), 20)
 
-    embedder = get_embeddings_client(task_type="RETRIEVAL_QUERY")
+    embedder = get_embeddings_client()
     query_vector = embedder.embed_query(query)
 
     pc = get_pinecone_client()

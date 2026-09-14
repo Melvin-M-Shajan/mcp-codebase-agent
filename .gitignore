@@ -7,3 +7,4 @@ target-repo/
 demo/*.log
 *.egg-info/
 .coverage
+*.log

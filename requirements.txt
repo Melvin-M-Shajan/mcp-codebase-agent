@@ -3,10 +3,15 @@ mcp>=1.0
 langgraph>=0.2
 langchain-core>=0.2
 
-# LLM + embeddings: Gemini, via langchain-google-genai (chosen instead of the PRD's
-# OpenAI/Anthropic default -- see README "Deviations from PRD" for why).
-langchain-google-genai>=2.0
-google-genai>=1.0
+# LLM: Groq (openai/gpt-oss-120b), via langchain-groq -- chosen instead of the PRD's
+# OpenAI/Anthropic default (see README "Deviations from PRD" for why, including why
+# Gemini was tried first and replaced).
+langchain-groq>=0.2
+
+# Embeddings: sentence-transformers/all-MiniLM-L6-v2, the PRD's own open-source fallback
+# (§8.2), run locally -- no API key, no rate limit (see README "Deviations from PRD").
+sentence-transformers>=3.0
+langchain-huggingface>=0.1
 
 # Vector store
 pinecone>=5.0

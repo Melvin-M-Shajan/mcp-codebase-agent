@@ -9,22 +9,23 @@ against the live MCP server + Pinecone index + Gemini, and an actual RAGAS scori
 import argparse
 import asyncio
 import json
+import logging
 import statistics
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+for _noisy in ("httpx", "httpcore", "urllib3", "sentence_transformers", "huggingface_hub", "pinecone"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 from dotenv import load_dotenv
-from langfuse import Langfuse, get_client
+from langfuse import get_client
 from langfuse.langchain import CallbackHandler
-from ragas import EvaluationDataset, SingleTurnSample, evaluate
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.llms import LangchainLLMWrapper
-from ragas.metrics import AnswerRelevancy, ContextPrecision, Faithfulness
 
 from src.agent.graph import build_graph, new_state
-from src.agent.llm import get_llm
+from src.agent.llm import get_answer_llm, get_llm, get_planner_llm
 from src.agent.mcp_client import mcp_session
 from src.rag.embeddings import get_embeddings_client
 
@@ -42,7 +43,8 @@ def load_questions(path: str) -> list[dict]:
 def extract_retrieved_contexts(final_state: dict) -> list[str]:
     contexts = [hit["snippet"] for hit in final_state["retrieved_context"]]
     for call in final_state["tool_calls"]:
-        contexts.append(f"[{call['tool']}({call['args']})] -> {json.dumps(call['result'], default=str)[:3000]}")
+        result_str = json.dumps(call["result"], default=str)[:3000]
+        contexts.append(f"Evidence from the {call['tool']} tool, called with {call['args']}: {result_str}")
     return contexts or ["(no context retrieved)"]
 
 
@@ -69,8 +71,10 @@ def file_grounding_hit(final_state: dict, reference_files: list[str]) -> bool | 
     return any(ref in touched for ref in reference_files)
 
 
-async def run_agent_for_question(session, llm, question_obj: dict, langfuse_handler, session_id: str) -> dict:
-    graph = build_graph(session, llm)
+async def run_agent_for_question(
+    session, planner_llm, answer_llm, question_obj: dict, langfuse_handler, session_id: str
+) -> dict:
+    graph = build_graph(session, planner_llm, answer_llm)
     state = new_state(question_obj["question"])
     config = {
         "callbacks": [langfuse_handler],
@@ -88,7 +92,8 @@ async def run_agent_for_question(session, llm, question_obj: dict, langfuse_hand
 
 async def run_all_questions(questions: list[dict], max_steps: int = 6) -> tuple[list[dict], str]:
     load_dotenv()
-    llm = get_llm()
+    planner_llm = get_planner_llm()
+    answer_llm = get_answer_llm()
     langfuse_handler = CallbackHandler()
     session_id = f"eval-run-{uuid.uuid4().hex[:8]}"
 
@@ -96,7 +101,7 @@ async def run_all_questions(questions: list[dict], max_steps: int = 6) -> tuple[
     async with mcp_session() as session:
         for q in questions:
             print(f"  running {q['id']}: {q['question'][:70]}...", flush=True)
-            result = await run_agent_for_question(session, llm, q, langfuse_handler, session_id)
+            result = await run_agent_for_question(session, planner_llm, answer_llm, q, langfuse_handler, session_id)
             results.append(result)
 
     get_client().flush()
@@ -104,10 +109,17 @@ async def run_all_questions(questions: list[dict], max_steps: int = 6) -> tuple[
 
 
 def score_with_ragas(results: list[dict]) -> Any:
-    google_llm = get_llm(temperature=0.0)
-    google_embeddings = get_embeddings_client(task_type="RETRIEVAL_QUERY")
-    ragas_llm = LangchainLLMWrapper(google_llm)
-    ragas_embeddings = LangchainEmbeddingsWrapper(google_embeddings)
+    # Imported here, not at module level: ragas.executor calls nest_asyncio.apply() as an
+    # import side effect, which breaks anyio's event-loop detection inside mcp_session's
+    # subprocess handling if it happens before that runs. Scoring only starts after all
+    # agent runs (and their MCP subprocess work) are already complete, so it's safe here.
+    from ragas import EvaluationDataset, SingleTurnSample, evaluate
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.metrics import AnswerRelevancy, ContextPrecision, Faithfulness
+
+    ragas_llm = LangchainLLMWrapper(get_llm(temperature=0.0))
+    ragas_embeddings = LangchainEmbeddingsWrapper(get_embeddings_client())
 
     samples = []
     for r in results:
@@ -217,6 +229,7 @@ async def main_async(questions_path: str, out_path: str) -> None:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--questions", default="eval/questions.jsonl")
     parser.add_argument("--out", default="eval/EVAL_REPORT.md")

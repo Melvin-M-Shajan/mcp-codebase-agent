@@ -7,15 +7,28 @@ import itertools
 import pytest
 
 import src.agent.graph as graph_module
-from src.agent.graph import PlanDecision, build_graph, new_state
+from src.agent.graph import FINISH_TOOL_NAME, build_graph, new_state
 
 
-class _FakeStructuredLLM:
-    def __init__(self, decisions):
-        self._decisions = iter(decisions)
+class _FakeToolCallResponse:
+    def __init__(self, name, args):
+        self.tool_calls = [{"name": name, "args": args, "id": "fake-id", "type": "tool_call"}]
+
+
+def _finish(reasoning="enough context"):
+    return _FakeToolCallResponse(FINISH_TOOL_NAME, {"reasoning": reasoning})
+
+
+def _call(tool, args):
+    return _FakeToolCallResponse(tool, args)
+
+
+class _FakeBoundLLM:
+    def __init__(self, responses):
+        self._responses = iter(responses)
 
     async def ainvoke(self, messages):
-        return next(self._decisions)
+        return next(self._responses)
 
 
 class _FakeAnswer:
@@ -24,12 +37,12 @@ class _FakeAnswer:
 
 
 class FakeLLM:
-    def __init__(self, decisions, answer_text="Fake grounded answer citing foo.py:1-2."):
-        self._decisions = decisions
+    def __init__(self, responses, answer_text="Fake grounded answer citing foo.py:1-2."):
+        self._responses = responses
         self._answer_text = answer_text
 
-    def with_structured_output(self, schema):
-        return _FakeStructuredLLM(self._decisions)
+    def bind_tools(self, tools, **kwargs):
+        return _FakeBoundLLM(self._responses)
 
     async def ainvoke(self, messages):
         return _FakeAnswer(self._answer_text)
@@ -49,9 +62,8 @@ def patch_call_tool(monkeypatch):
 class TestAgentGraph:
     @pytest.mark.asyncio
     async def test_terminates_with_answer_when_plan_says_done_immediately(self):
-        decisions = [PlanDecision(done=True, tool=None, args={}, reasoning="enough context")]
-        llm = FakeLLM(decisions)
-        graph = build_graph(session=object(), llm=llm)
+        llm = FakeLLM([_finish()])
+        graph = build_graph(session=object(), planner_llm=llm, answer_llm=llm)
 
         final_state = await graph.ainvoke(new_state("Where is foo implemented?", max_steps=6))
 
@@ -61,12 +73,9 @@ class TestAgentGraph:
 
     @pytest.mark.asyncio
     async def test_calls_tool_then_answers_when_plan_says_not_done_once(self):
-        decisions = [
-            PlanDecision(done=False, tool="read_file", args={"path": "foo.py"}, reasoning="need the file"),
-            PlanDecision(done=True, tool=None, args={}, reasoning="enough now"),
-        ]
-        llm = FakeLLM(decisions)
-        graph = build_graph(session=object(), llm=llm)
+        responses = [_call("read_file", {"path": "foo.py"}), _finish("enough now")]
+        llm = FakeLLM(responses)
+        graph = build_graph(session=object(), planner_llm=llm, answer_llm=llm)
 
         final_state = await graph.ainvoke(new_state("Why does foo fail?", max_steps=6))
 
@@ -77,11 +86,9 @@ class TestAgentGraph:
 
     @pytest.mark.asyncio
     async def test_step_budget_forces_answer_when_plan_never_says_done(self):
-        never_done = itertools.cycle(
-            [PlanDecision(done=False, tool="search_code", args={"query": "x"}, reasoning="keep looking")]
-        )
+        never_done = itertools.cycle([_call("search_code", {"query": "x"})])
         llm = FakeLLM(never_done)
-        graph = build_graph(session=object(), llm=llm)
+        graph = build_graph(session=object(), planner_llm=llm, answer_llm=llm)
 
         final_state = await graph.ainvoke(new_state("An unanswerable question", max_steps=3))
 

@@ -110,7 +110,7 @@ class TestSearchCode:
                 assert kwargs["namespace"] == "test-ns"
                 return FakeResponse()
 
-        monkeypatch.setattr(search_code_module, "get_embeddings_client", lambda task_type: FakeEmbedder())
+        monkeypatch.setattr(search_code_module, "get_embeddings_client", lambda: FakeEmbedder())
         monkeypatch.setattr(search_code_module, "get_pinecone_client", lambda: object())
         monkeypatch.setattr(search_code_module, "ensure_index", lambda pc, name: FakeIndex())
 
@@ -134,7 +134,7 @@ class TestSearchCode:
                 assert kwargs["top_k"] == 20
                 return FakeResponse()
 
-        monkeypatch.setattr(search_code_module, "get_embeddings_client", lambda task_type: FakeEmbedder())
+        monkeypatch.setattr(search_code_module, "get_embeddings_client", lambda: FakeEmbedder())
         monkeypatch.setattr(search_code_module, "get_pinecone_client", lambda: object())
         monkeypatch.setattr(search_code_module, "ensure_index", lambda pc, name: FakeIndex())
 
