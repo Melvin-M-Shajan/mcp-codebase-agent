@@ -157,6 +157,13 @@ async def _invoke_with_retry(
 
 SNIPPET_PREVIEW_CHARS = 400
 RESULT_CONTENT_FIELD_CHARS = 400
+# Hard ceiling on the whole dynamic context block. Per-field truncation alone isn't
+# enough: gpt-oss-120b's free tier rejects a single request outright once it exceeds
+# ~8000 tokens/minute (a `Request too large` 413, not a retryable rate limit -- no
+# amount of key-switching fixes an oversized request), and a question needing several
+# tool calls can still add up past that even with each individual field trimmed.
+# Verified live: q02 hit exactly this with 6 accumulated tool-call results.
+MAX_CONTEXT_CHARS = 6000
 
 
 def _truncate_result_for_prompt(result: object) -> str:
@@ -192,13 +199,26 @@ def _summarize_context(state: AgentState) -> str:
         for hit in state["retrieved_context"]:
             snippet = hit["snippet"][:SNIPPET_PREVIEW_CHARS]
             parts.append(f"- {hit['file_path']}:{hit['start_line']}-{hit['end_line']} (score={hit['score']:.3f})\n{snippet}")
+    evidence_parts: list[str] = []
     if state["tool_calls"]:
-        parts.append("\nEvidence gathered from tools used so far:")
+        evidence_parts.append("\nEvidence gathered from tools used so far:")
         for i, call in enumerate(state["tool_calls"], start=1):
             result_preview = _truncate_result_for_prompt(call["result"])
-            parts.append(
+            evidence_parts.append(
                 f"- Evidence {i}, from the {call['tool']} tool, called with {call['args']}:\n{result_preview}"
             )
+
+    # If everything together is still too big for a single request, drop the *oldest*
+    # tool-call evidence entries first (most recent evidence is most relevant to the
+    # next decision) rather than hard-truncating mid-JSON, which risks re-creating the
+    # exact "field silently missing" bug this was built to avoid.
+    while evidence_parts and len("\n".join(parts + evidence_parts)) > MAX_CONTEXT_CHARS:
+        # evidence_parts[0] is the header line; [1] is the oldest evidence entry.
+        del evidence_parts[1 : 2]
+        if len(evidence_parts) == 1:
+            evidence_parts = []  # only the header left, nothing to show
+
+    parts.extend(evidence_parts)
     return "\n".join(parts) if parts else "(nothing gathered yet)"
 
 
