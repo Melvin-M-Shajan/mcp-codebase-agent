@@ -156,7 +156,24 @@ async def _invoke_with_retry(
 
 
 SNIPPET_PREVIEW_CHARS = 400
-RESULT_PREVIEW_CHARS = 500
+RESULT_CONTENT_FIELD_CHARS = 400
+
+
+def _truncate_result_for_prompt(result: object) -> str:
+    """Truncates long *field values* (e.g. read_file's `content`) rather than the
+    serialized JSON string as a whole -- truncating the string blindly can cut off a
+    field that comes after a long one (e.g. read_file's `total_lines`, which follows
+    `content`), silently hiding real data the model needs. Verified live: this exact bug
+    made the agent report a wrong line count once and "I don't know" a knowable one
+    another time, both because `total_lines` never made it into the prompt."""
+    if isinstance(result, dict):
+        result = {
+            k: (v[:RESULT_CONTENT_FIELD_CHARS] + "...(truncated)" if isinstance(v, str) and len(v) > RESULT_CONTENT_FIELD_CHARS else v)
+            for k, v in result.items()
+        }
+    elif isinstance(result, list):
+        result = result[:10]
+    return json.dumps(result, indent=2, default=str)
 
 
 def _summarize_context(state: AgentState) -> str:
@@ -165,7 +182,7 @@ def _summarize_context(state: AgentState) -> str:
     # tool-call JSON payload as its own output when the prompt contains text shaped like
     # a function call, even with no tools bound and no such call requested.
     #
-    # Snippets/results are truncated for the prompt (not for RAGAS's context, which uses
+    # Snippets/results are trimmed for the prompt (not for RAGAS's context, which uses
     # the full untruncated data -- see run_eval.py): this context gets resent on every
     # plan_node/answer_node call in the loop (up to max_steps+1 times), and Groq's free
     # tier has a real daily token budget per model, so trimming it matters.
@@ -178,7 +195,7 @@ def _summarize_context(state: AgentState) -> str:
     if state["tool_calls"]:
         parts.append("\nEvidence gathered from tools used so far:")
         for i, call in enumerate(state["tool_calls"], start=1):
-            result_preview = json.dumps(call["result"], indent=2, default=str)[:RESULT_PREVIEW_CHARS]
+            result_preview = _truncate_result_for_prompt(call["result"])
             parts.append(
                 f"- Evidence {i}, from the {call['tool']} tool, called with {call['args']}:\n{result_preview}"
             )

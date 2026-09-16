@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from langfuse import get_client
 from langfuse.langchain import CallbackHandler
 
-from src.agent.graph import build_graph, new_state
+from src.agent.graph import _truncate_result_for_prompt, build_graph, new_state
 from src.agent.llm import get_answer_llms, get_llm, get_planner_llms
 from src.agent.mcp_client import mcp_session
 from src.rag.embeddings import get_embeddings_client
@@ -41,9 +41,13 @@ def load_questions(path: str) -> list[dict]:
 
 
 def extract_retrieved_contexts(final_state: dict) -> list[str]:
+    # Uses the same field-aware truncation as the agent's own prompt (graph.py) --
+    # blindly slicing the serialized JSON string can cut off a field (e.g. read_file's
+    # total_lines) that comes after a long one, silently hiding real data from RAGAS's
+    # judge too.
     contexts = [hit["snippet"] for hit in final_state["retrieved_context"]]
     for call in final_state["tool_calls"]:
-        result_str = json.dumps(call["result"], default=str)[:3000]
+        result_str = _truncate_result_for_prompt(call["result"])
         contexts.append(f"Evidence from the {call['tool']} tool, called with {call['args']}: {result_str}")
     return contexts or ["(no context retrieved)"]
 
