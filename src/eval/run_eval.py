@@ -165,7 +165,11 @@ def score_with_ragas(results: list[dict]) -> Any:
         )
     dataset = EvaluationDataset(samples=samples)
 
-    metrics = [Faithfulness(), AnswerRelevancy(), ContextPrecision()]
+    # strictness=1: AnswerRelevancy's default (3) asks Groq for n=3 completions in one
+    # call to self-check consistency; Groq's API rejects n>1 ('number must be at most
+    # 1'). strictness=1 keeps the metric working (one completion, no self-consistency
+    # check) instead of every sample silently scoring NaN.
+    metrics = [Faithfulness(), AnswerRelevancy(strictness=1), ContextPrecision()]
     return evaluate(dataset=dataset, metrics=metrics, llm=ragas_llm, embeddings=ragas_embeddings)
 
 
@@ -244,13 +248,41 @@ def build_report(results: list[dict], ragas_result: Any, session_id: str) -> str
     return "\n".join(lines)
 
 
-async def main_async(questions_path: str, out_path: str) -> None:
-    questions = load_questions(questions_path)
-    print(f"Loaded {len(questions)} questions from {questions_path}")
+def _save_raw_results(results: list[dict], session_id: str, path: str) -> None:
+    """Agent runs are the expensive, rate-limited part; scoring can fail or need
+    re-tuning (e.g. a RAGAS metric option) independently. Dumping raw results here means
+    a scoring-only rerun (`--raw-results` below) never has to redo the agent loop."""
+    payload = {
+        "session_id": session_id,
+        "results": [
+            {
+                "question_obj": r["question_obj"],
+                "final_state": r["final_state"],
+                "elapsed_seconds": r["elapsed_seconds"],
+            }
+            for r in results
+        ],
+    }
+    Path(path).write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
+    print(f"Saved raw agent results to {path}")
 
-    results, session_id = await run_all_questions(questions)
-    print("All agent runs complete. Scoring with RAGAS...")
 
+async def main_async(questions_path: str, out_path: str, raw_results_path: str | None) -> None:
+    if raw_results_path and Path(raw_results_path).exists():
+        print(f"Loading raw agent results from {raw_results_path} (skipping the agent loop)")
+        payload = json.loads(Path(raw_results_path).read_text(encoding="utf-8"))
+        results, session_id = payload["results"], payload["session_id"]
+    else:
+        questions = load_questions(questions_path)
+        print(f"Loaded {len(questions)} questions from {questions_path}")
+
+        results, session_id = await run_all_questions(questions)
+        print("All agent runs complete.")
+
+        if raw_results_path:
+            _save_raw_results(results, session_id, raw_results_path)
+
+    print("Scoring with RAGAS...")
     ragas_result = score_with_ragas(results)
     report = build_report(results, ragas_result, session_id)
 
@@ -263,9 +295,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--questions", default="eval/questions.jsonl")
     parser.add_argument("--out", default="eval/EVAL_REPORT.md")
+    parser.add_argument(
+        "--raw-results",
+        default="eval/raw_agent_results.json",
+        help="Where to save/load raw agent results. If this file already exists, the agent "
+        "loop is skipped entirely and only scoring is (re-)run against it. Pass '' to disable.",
+    )
     args = parser.parse_args()
 
-    asyncio.run(main_async(args.questions, args.out))
+    asyncio.run(main_async(args.questions, args.out, args.raw_results or None))
 
 
 if __name__ == "__main__":

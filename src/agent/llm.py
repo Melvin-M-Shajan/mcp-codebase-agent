@@ -64,5 +64,11 @@ def get_answer_llms(temperature: float = 0.0) -> list[ChatGroq]:
 
 
 def get_llm(temperature: float = 0.0) -> ChatGroq:
-    """Used where only one general-purpose model/key is needed (RAGAS's judge)."""
-    return get_answer_llms(temperature)[0]
+    """Used where only one client is needed and multi-key fallback isn't wired up
+    (RAGAS's judge -- LangchainLLMWrapper sets attributes directly on the wrapped
+    object, which breaks with a LangChain `.with_fallbacks()` Runnable since that isn't
+    a BaseChatModel, so a single plain client is used instead). Picks the *last*
+    available key rather than the first: by the time RAGAS scoring runs, the agent loop
+    has already spent most of the earlier keys' daily budget (they're tried first in
+    the fallback order), so the last key has the most headroom left."""
+    return get_answer_llms(temperature)[-1]
