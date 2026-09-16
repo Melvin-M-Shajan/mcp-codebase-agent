@@ -34,10 +34,20 @@ ANSWER_MODEL = "groq/compound-mini"
 
 
 def _groq_api_keys() -> list[str]:
+    """GROQ_API_KEY, then GROQ_API_KEY_BACKUP, GROQ_API_KEY_BACKUP_2, ... -- as many as
+    are set. Each is a separate Groq account/project with its own independent daily
+    token budget, so more keys means more total headroom for a run."""
     keys = [os.environ["GROQ_API_KEY"]]
     backup = os.environ.get("GROQ_API_KEY_BACKUP")
     if backup:
         keys.append(backup)
+    i = 2
+    while True:
+        extra = os.environ.get(f"GROQ_API_KEY_BACKUP_{i}")
+        if not extra:
+            break
+        keys.append(extra)
+        i += 1
     return keys
 
 
