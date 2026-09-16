@@ -16,6 +16,8 @@ jobs:
           git clone https://github.com/encode/httpx.git target-repo
           cd target-repo
           git checkout b5addb64f0161ff6bfe94c124ef76f6a1fba5254
+      - name: Install target repo's own test dependencies (for run_tests)
+        run: pip install -e "./target-repo[brotli,cli,http2,socks,zstd]" chardet cryptography pytest trio trustme uvicorn
       - run: python -m src.rag.ingest --repo-root ./target-repo --index-name mcp-codebase-agent --namespace ci
         env:
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
@@ -23,6 +25,7 @@ jobs:
         env:
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_BACKUP: ${{ secrets.GROQ_API_KEY_BACKUP }}
           PINECONE_NAMESPACE: ci
           REPO_ROOT: ./target-repo
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}

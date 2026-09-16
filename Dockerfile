@@ -19,7 +19,10 @@ ARG TARGET_REPO_COMMIT=b5addb64f0161ff6bfe94c124ef76f6a1fba5254
 RUN git clone ${TARGET_REPO_URL} target-repo \
     && cd target-repo \
     && git checkout ${TARGET_REPO_COMMIT}
-RUN pip install --no-cache-dir -e ./target-repo[http2,socks,zstd] pytest trio chardet
+# Matches target-repo/requirements.txt's test-relevant subset (skips docs/packaging
+# tools httpx's own CI needs but run_tests doesn't).
+RUN pip install --no-cache-dir -e "./target-repo[brotli,cli,http2,socks,zstd]" \
+    chardet cryptography pytest trio trustme uvicorn
 
 COPY src/ ./src/
 COPY eval/ ./eval/
@@ -27,4 +30,6 @@ COPY eval/ ./eval/
 ENV REPO_ROOT=/app/target-repo
 ENV PYTHONPATH=/app
 
-ENTRYPOINT ["python", "-m", "src.demo.chat"]
+# CMD, not ENTRYPOINT: §11.1 runs eval as `docker run <image> python -m src.eval.run_eval
+# ...`, which needs to replace the default command outright, not append to it.
+CMD ["python", "-m", "src.demo.chat"]

@@ -25,7 +25,7 @@ from langfuse import get_client
 from langfuse.langchain import CallbackHandler
 
 from src.agent.graph import build_graph, new_state
-from src.agent.llm import get_answer_llm, get_llm, get_planner_llm
+from src.agent.llm import get_answer_llms, get_llm, get_planner_llms
 from src.agent.mcp_client import mcp_session
 from src.rag.embeddings import get_embeddings_client
 
@@ -72,9 +72,9 @@ def file_grounding_hit(final_state: dict, reference_files: list[str]) -> bool | 
 
 
 async def run_agent_for_question(
-    session, planner_llm, answer_llm, question_obj: dict, langfuse_handler, session_id: str
+    session, planner_llms, answer_llms, question_obj: dict, langfuse_handler, session_id: str
 ) -> dict:
-    graph = build_graph(session, planner_llm, answer_llm)
+    graph = build_graph(session, planner_llms, answer_llms)
     state = new_state(question_obj["question"])
     config = {
         "callbacks": [langfuse_handler],
@@ -92,8 +92,8 @@ async def run_agent_for_question(
 
 async def run_all_questions(questions: list[dict], max_steps: int = 6) -> tuple[list[dict], str]:
     load_dotenv()
-    planner_llm = get_planner_llm()
-    answer_llm = get_answer_llm()
+    planner_llms = get_planner_llms()
+    answer_llms = get_answer_llms()
     langfuse_handler = CallbackHandler()
     session_id = f"eval-run-{uuid.uuid4().hex[:8]}"
 
@@ -101,11 +101,40 @@ async def run_all_questions(questions: list[dict], max_steps: int = 6) -> tuple[
     async with mcp_session() as session:
         for q in questions:
             print(f"  running {q['id']}: {q['question'][:70]}...", flush=True)
-            result = await run_agent_for_question(session, planner_llm, answer_llm, q, langfuse_handler, session_id)
+            result = await run_agent_for_question(session, planner_llms, answer_llms, q, langfuse_handler, session_id)
             results.append(result)
 
     get_client().flush()
     return results, session_id
+
+
+def _patch_ragas_vertexai_import() -> None:
+    """ragas.llms.base unconditionally imports langchain_community.chat_models.vertexai,
+    which newer langchain-community releases removed (split into a separate integration
+    package). This project never uses VertexAI, so a stub module registered in
+    sys.modules before ragas imports it is enough -- portable across Docker, CI, and
+    local dev, unlike patching the installed package's files. See README "Deviations
+    from PRD"."""
+    module_name = "langchain_community.chat_models.vertexai"
+    if module_name in sys.modules:
+        return
+    try:
+        import langchain_community.chat_models.vertexai  # noqa: F401
+
+        return  # a real one exists, nothing to patch
+    except ModuleNotFoundError:
+        pass
+
+    import types
+
+    stub = types.ModuleType(module_name)
+
+    class ChatVertexAI:
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError("ChatVertexAI stub -- not used by this project")
+
+    stub.ChatVertexAI = ChatVertexAI
+    sys.modules[module_name] = stub
 
 
 def score_with_ragas(results: list[dict]) -> Any:
@@ -113,6 +142,7 @@ def score_with_ragas(results: list[dict]) -> Any:
     # import side effect, which breaks anyio's event-loop detection inside mcp_session's
     # subprocess handling if it happens before that runs. Scoring only starts after all
     # agent runs (and their MCP subprocess work) are already complete, so it's safe here.
+    _patch_ragas_vertexai_import()
     from ragas import EvaluationDataset, SingleTurnSample, evaluate
     from ragas.embeddings import LangchainEmbeddingsWrapper
     from ragas.llms import LangchainLLMWrapper

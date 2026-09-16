@@ -1,15 +1,16 @@
 """§7.2/§7.3 graph nodes and routing.
 
-Nodes are built by `build_graph(session, planner_llm, answer_llm)` as closures over a
-live MCP `ClientSession` and two chat models (see src/agent/llm.py for why two), but
-each still matches the PRD's `(state: AgentState) -> AgentState` node signature -- the
-closure is just how session/llm get in without changing that signature or resorting to
-module-level globals.
+Nodes are built by `build_graph(session, planner_llms, answer_llms)` as closures over a
+live MCP `ClientSession` and lists of chat model clients (see src/agent/llm.py for why
+two roles and why lists), but each still matches the PRD's `(state: AgentState) ->
+AgentState` node signature -- the closure is just how session/llm get in without
+changing that signature or resorting to module-level globals.
 """
 
 import asyncio
 import json
 import logging
+import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
@@ -99,30 +100,63 @@ _PLAN_TOOL_SPECS = [
 ]
 
 
-async def _invoke_with_retry(runnable, messages, max_retries: int = 4, base_delay: float = 8.0):
-    """Groq's free tier applies per-model tokens-per-minute limits; a multi-question run
-    (agent loop + RAGAS judge calls) legitimately bursts past those sometimes -- retry
-    with backoff instead of failing the whole run on a transient 429. A daily (TPD) cap
-    is a different story -- retrying burns more of a budget that won't refill for a long
-    time, so that fails immediately instead."""
-    delay = base_delay
-    for attempt in range(max_retries):
-        try:
-            return await runnable.ainvoke(messages)
-        except Exception as exc:
-            text = str(exc).lower()
-            if "tpd" in text or "tokens per day" in text:
-                raise
-            is_rate_limit = "rate_limit" in text or "429" in text
-            if not is_rate_limit or attempt == max_retries - 1:
-                raise
-            logger.warning("rate limited, retrying in %.0fs (%d/%d): %s", delay, attempt + 1, max_retries, exc)
-            await asyncio.sleep(delay)
-            delay *= 2
+_RETRY_DELAY_RE = re.compile(r"try again in (?:(\d+)m)?([\d.]+)s")
 
 
-SNIPPET_PREVIEW_CHARS = 600
-RESULT_PREVIEW_CHARS = 900
+def _parse_groq_retry_seconds(text: str, default: float = 90.0) -> float:
+    match = _RETRY_DELAY_RE.search(text)
+    if not match:
+        return default
+    minutes = int(match.group(1)) if match.group(1) else 0
+    seconds = float(match.group(2))
+    return minutes * 60 + seconds + 5  # small safety margin
+
+
+async def _invoke_with_retry(
+    runnables: list, messages, max_retries: int = 4, base_delay: float = 8.0, max_daily_cap_waits: int = 6
+):
+    """`runnables` is one client per available API key (see src/agent/llm.py), all bound
+    identically. Groq's free tier applies per-model tokens-per-minute limits; a
+    multi-question run (agent loop + RAGAS judge calls) legitimately bursts past those
+    sometimes -- retry with backoff on the same client instead of failing the whole run
+    on a transient 429. A daily (TPD) cap is a different story -- retrying the same key
+    immediately just burns more of a budget that won't refill for a long time, so that
+    falls through to the next key first; once every key is on a daily cap, sleep for
+    Groq's own reported reset time (it's a rolling window, so this is usually minutes,
+    not a full day) and cycle through the keys again, up to `max_daily_cap_waits` times."""
+    last_exc: Exception | None = None
+    for _wait_round in range(max_daily_cap_waits):
+        all_daily_capped = True
+        for runnable in runnables:
+            delay = base_delay
+            for attempt in range(max_retries):
+                try:
+                    return await runnable.ainvoke(messages)
+                except Exception as exc:
+                    last_exc = exc
+                    text = str(exc).lower()
+                    if "tpd" in text or "tokens per day" in text:
+                        logger.warning("daily token cap hit on this key, falling through to next key: %s", exc)
+                        break
+                    all_daily_capped = False
+                    is_rate_limit = "rate_limit" in text or "429" in text
+                    if not is_rate_limit or attempt == max_retries - 1:
+                        raise
+                    logger.warning(
+                        "rate limited, retrying in %.0fs (%d/%d): %s", delay, attempt + 1, max_retries, exc
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2
+        if not all_daily_capped:
+            raise last_exc
+        wait_s = _parse_groq_retry_seconds(str(last_exc))
+        logger.warning("every key is daily-capped, sleeping %.0fs before retrying all of them again", wait_s)
+        await asyncio.sleep(wait_s)
+    raise last_exc
+
+
+SNIPPET_PREVIEW_CHARS = 400
+RESULT_PREVIEW_CHARS = 500
 
 
 def _summarize_context(state: AgentState) -> str:
@@ -151,11 +185,13 @@ def _summarize_context(state: AgentState) -> str:
     return "\n".join(parts) if parts else "(nothing gathered yet)"
 
 
-def build_graph(session, planner_llm, answer_llm):
-    planner = planner_llm.bind_tools(_PLAN_TOOL_SPECS, tool_choice="auto")
+def build_graph(session, planner_llms, answer_llms):
+    """`planner_llms`/`answer_llms` are lists (one client per available API key) -- see
+    src/agent/llm.py's get_planner_llms()/get_answer_llms()."""
+    planners = [llm.bind_tools(_PLAN_TOOL_SPECS, tool_choice="auto") for llm in planner_llms]
 
     async def retrieve_node(state: AgentState) -> AgentState:
-        hits = await call_tool(session, "search_code", {"query": state["question"], "top_k": 8})
+        hits = await call_tool(session, "search_code", {"query": state["question"], "top_k": 5})
         return {**state, "retrieved_context": hits}
 
     async def plan_node(state: AgentState) -> AgentState:
@@ -170,7 +206,7 @@ def build_graph(session, planner_llm, answer_llm):
                 )
             ),
         ]
-        response = await _invoke_with_retry(planner, messages)
+        response = await _invoke_with_retry(planners, messages)
         if not response.tool_calls:
             # Model answered in prose instead of calling a tool despite instructions --
             # treat that as "done" rather than crash; answer_node still produces the
@@ -216,7 +252,7 @@ def build_graph(session, planner_llm, answer_llm):
             SystemMessage(content=ANSWER_SYSTEM_PROMPT),
             HumanMessage(content=f"Question: {state['question']}\n\n{_summarize_context(state)}\n{note}"),
         ]
-        response = await _invoke_with_retry(answer_llm, messages)
+        response = await _invoke_with_retry(answer_llms, messages)
         return {**state, "answer": response.content}
 
     def route_after_plan(state: AgentState) -> str:

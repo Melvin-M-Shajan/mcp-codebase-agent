@@ -63,7 +63,7 @@ class TestAgentGraph:
     @pytest.mark.asyncio
     async def test_terminates_with_answer_when_plan_says_done_immediately(self):
         llm = FakeLLM([_finish()])
-        graph = build_graph(session=object(), planner_llm=llm, answer_llm=llm)
+        graph = build_graph(session=object(), planner_llms=[llm], answer_llms=[llm])
 
         final_state = await graph.ainvoke(new_state("Where is foo implemented?", max_steps=6))
 
@@ -75,7 +75,7 @@ class TestAgentGraph:
     async def test_calls_tool_then_answers_when_plan_says_not_done_once(self):
         responses = [_call("read_file", {"path": "foo.py"}), _finish("enough now")]
         llm = FakeLLM(responses)
-        graph = build_graph(session=object(), planner_llm=llm, answer_llm=llm)
+        graph = build_graph(session=object(), planner_llms=[llm], answer_llms=[llm])
 
         final_state = await graph.ainvoke(new_state("Why does foo fail?", max_steps=6))
 
@@ -88,7 +88,7 @@ class TestAgentGraph:
     async def test_step_budget_forces_answer_when_plan_never_says_done(self):
         never_done = itertools.cycle([_call("search_code", {"query": "x"})])
         llm = FakeLLM(never_done)
-        graph = build_graph(session=object(), planner_llm=llm, answer_llm=llm)
+        graph = build_graph(session=object(), planner_llms=[llm], answer_llms=[llm])
 
         final_state = await graph.ainvoke(new_state("An unanswerable question", max_steps=3))
 

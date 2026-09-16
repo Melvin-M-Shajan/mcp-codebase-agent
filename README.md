@@ -99,13 +99,21 @@ docker run --env-file .env mcp-codebase-agent python -m src.eval.run_eval \
   errors ("Tool choice is none, but model called a tool") and, worse, as silently useless
   JSON-shaped "answers" that don't error at all. This reproduced reliably even after
   rewording the context to avoid any `func(args)`-shaped text and adding an explicit
-  "never output JSON" instruction. `get_planner_llm()` (gpt-oss-120b) is used for
-  `plan_node`'s tool-choosing; `get_answer_llm()` (`groq/compound-mini`, 128k context, no
+  "never output JSON" instruction. `get_planner_llms()` (gpt-oss-120b) is used for
+  `plan_node`'s tool-choosing; `get_answer_llms()` (`groq/compound-mini`, 128k context, no
   such failure mode observed) is used for `answer_node`'s final-answer synthesis and as
   RAGAS's judge model -- `allam-2-7b` was tried first and also avoided the failure mode,
   but its 4096-token context window turned out too small once a `read_file` result
-  landed in the prompt (`context_length_exceeded`). `build_graph(session, planner_llm,
-  answer_llm)` takes both models explicitly.
+  landed in the prompt (`context_length_exceeded`). `build_graph(session, planner_llms,
+  answer_llms)` takes both roles explicitly.
+- **Key fallback across two Groq API keys.** Even after trimming context size, a full
+  24-question eval run needs more than `openai/gpt-oss-120b`'s 200,000-token/day
+  free-tier budget (~40k tokens/question observed, and the daily window is rolling, not
+  a hard midnight reset). The user supplied a backup Groq key for exactly this --
+  `get_planner_llms()`/`get_answer_llms()` return one client per available
+  `GROQ_API_KEY*` env var, and `_invoke_with_retry` (`src/agent/graph.py`) falls through
+  to the next key on a daily-cap error instead of failing (it still retries per-minute
+  limits on the same key, since those are transient).
 - **Embeddings: local `sentence-transformers/all-MiniLM-L6-v2` instead of an API
   model.** §8.2 explicitly offers this as the fallback "if avoiding API cost" -- it
   became necessary, not just preferred: `gemini-embedding-2`'s free tier caps out at
